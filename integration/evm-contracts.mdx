@@ -1,0 +1,101 @@
+---
+title: EVM contracts
+description: Order struct, router and vault entry points, events, and errors
+---
+
+Two contracts matter to a partner: `GeniusRouter` (swap any token into USDC and create the order in one transaction) and `GeniusVault` (create an order directly when the user already holds USDC, read fees and order status). Both are Solidity 0.8.24, UUPS upgradeable, and pausable.
+
+## The Order struct
+
+Every address is carried as a left-padded `bytes32` so the same struct describes Solana orders. Convert with `vault.addressToBytes32(addr)` or off-chain with `bytes32(uint256(uint160(addr)))`.
+
+```solidity
+struct Order {
+    bytes32 seed;          // unique per order; with a destination call it MUST equal calldataToSeed(callTarget, callData)
+    bytes32 trader;        // source-chain sender; receives the refund on revert
+    bytes32 receiver;      // destination-chain recipient
+    bytes32 tokenIn;       // MUST be the source vault's STABLECOIN
+    bytes32 tokenOut;      // destination token; the USDC mint or address for a plain bridge
+    uint256 amountIn;      // USDC amount pulled from the caller, fee included
+    uint256 minAmountOut;  // slippage floor for the destination leg, in tokenOut units
+    uint256 srcChainId;    // must equal block.chainid of the source vault
+    uint256 destChainId;   // must differ from srcChainId and be a supported chain
+    uint256 fee;           // must be >= FeeCollector.getOrderFees(amountIn, destChainId).totalFee
+}
+```
+
+```solidity
+orderHash = keccak256(abi.encodePacked(
+    seed, trader, receiver, tokenIn, tokenOut,
+    amountIn, minAmountOut, srcChainId, destChainId, fee
+));
+```
+
+The hash is the order's identity on both chains. Compute it off-chain with the same packed encoding or call `vault.orderHash(order)`.
+
+## GeniusRouter entry points
+
+| Function | Token authorisation | Use when |
+| --- | --- | --- |
+| `swapAndCreateOrder(seed, tokensIn[], amountsIn[], target, toApprove, data, owner, destChainId, feeSurplus, receiver, minAmountOut, tokenOut)` | Prior `approve(router, amount)` per input token | User pays in any ERC-20; `target` and `data` are aggregator swap calldata that must output USDC to the router |
+| `swapAndCreateOrderPermit2(seed, permitBatch, permitSignature, target, toApprove, data, destChainId, feeSurplus, receiver, minAmountOut, tokenOut)` | Permit2 batch signature | Same as above without a separate approval transaction |
+| `createOrderPermit2(seed, permitBatch, permitSignature, destChainId, fee, receiver, minAmountOut, tokenOut)` | Permit2 batch signature, USDC only | User pays in USDC, no source swap |
+
+The router computes `fee` itself from `FeeCollector.getOrderFees(usdcReceived, destChainId)` and adds `feeSurplus`. `amountIn` is whatever USDC the swap produced, so the user's slippage on the source leg is bounded by the swap calldata, and slippage on the destination leg by `minAmountOut`. Native token input is supported by sending `msg.value` with the call.
+
+## GeniusVault functions a partner calls or reads
+
+| Function | Access | Purpose |
+| --- | --- | --- |
+| `createOrder(Order order)` | Anyone, not paused | Pulls `amountIn` USDC from the caller. Requires prior `approve(vault, amountIn)`. Reverts on bad fee, wrong `tokenIn`, `amountIn > maxOrderAmount`, duplicate hash, or stablecoin price outside the Chainlink bounds |
+| `orderStatus(bytes32 orderHash)` | View | `0 Nonexistant`, `1 Created`, `2 Filled`, `3 Reverted`. Read on the source vault for Created and Reverted, on the destination vault for Filled |
+| `orderHash(Order)` | Pure | Canonical hash |
+| `calldataToSeed(address target, bytes data)` | Pure | `keccak256(abi.encodePacked(target, keccak256(data)))`; required seed when the order carries a destination call |
+| `addressToBytes32` / `bytes32ToAddress` | Pure | Encoding helpers |
+| `STABLECOIN()`, `stablecoinBalance()`, `availableAssets()` | View | Vault token and liquidity, useful to sanity-check large orders before quoting |
+| `fillOrder`, `fillOrderBatch`, `revertOrder` | Orchestrator only | Destination settlement and source refund. Partners never call these |
+
+## FeeCollector
+
+`getOrderFees(uint256 amount, uint256 destChainId)` returns `FeeBreakdown { baseFee, bpsFee, insuranceFee, totalFee }`. Call it on the source chain's FeeCollector when building orders directly. It reverts with `InvalidDestChainId` for unsupported destinations.
+
+## Events to index
+
+```solidity
+// source vault
+event OrderCreated(
+    uint256 indexed destChainId, bytes32 indexed trader, bytes32 indexed receiver,
+    bytes32 seed, bytes32 orderHash, bytes32 tokenIn, bytes32 tokenOut,
+    uint256 amountIn, uint256 minAmountOut, uint256 fee
+);
+
+// destination vault
+event OrderFilled(
+    uint256 indexed srcChainId, bytes32 indexed trader, bytes32 indexed receiver,
+    bytes32 seed, bytes32 orderHash, address effectiveTokenOut, uint256 effectiveAmountOut,
+    uint256 amountStablecoinValue, bool success
+);
+
+// source vault
+event OrderReverted(
+    uint256 indexed srcChainId, bytes32 indexed trader, bytes32 indexed receiver,
+    bytes32 seed, bytes32 orderHash
+);
+```
+
+`OrderFilled.success` is false only when an optional destination call failed; the tokens are still delivered to the receiver in that case.
+
+## Errors you can hit from a partner transaction
+
+| Error | Cause |
+| --- | --- |
+| `InvalidAmount()` | `amountIn` is zero, not greater than `fee`, or above `maxOrderAmount` |
+| `InvalidFeeAmount()` / `InsufficientFees(attempted, actual)` | `fee` below the FeeCollector minimum |
+| `InvalidTokenIn()` | `tokenIn` is not the vault USDC |
+| `InvalidDestChainId(id)` / `InvalidSourceChainId(id)` | Unsupported or same-chain route |
+| `InvalidOrderStatus()` | Seed reuse; the hash already exists |
+| `PriceOutOfBounds(price)` / `StalePrice(ts)` | USDC depeg protection tripped; retry later |
+| `Paused()` | Protocol paused by the pauser role |
+| `ArrayLengthsMismatch()` / `InvalidPermitBatchLength()` | Malformed router arguments |
+
+ABIs for every contract are available on request.

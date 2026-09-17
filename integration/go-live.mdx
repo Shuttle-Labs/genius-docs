@@ -1,0 +1,42 @@
+---
+title: Security and go-live
+description: Audits, trust assumptions, launch checklist, and what we need from you
+---
+
+## Audits
+
+The bridge contracts were audited by Halborn (report dated 2 December 2024) and Hacken (27 January 2025). Both reports are shared on request.
+
+## Trust assumptions a partner should know
+
+- All EVM contracts are UUPS proxies upgradeable by the Genius admin multisig. Upgrades are announced to partners in advance.
+- Orders are filled from protocol-owned liquidity by orchestrators holding `ORCHESTRATOR_ROLE`. A user's funds are held by the vault contract, never by an orchestrator wallet.
+- `createOrder` is gated by a Chainlink USDC/USD feed on EVM and Pyth on Solana; during a depeg the protocol refuses new orders rather than mispricing them.
+- `maxOrderAmount` caps a single order per chain. Large tickets should be split or coordinated with us for a liquidity pre-position.
+- A pauser role can halt all vault functions; when paused, `createOrder` reverts with `Paused()` and orders already created are filled or reverted once operations resume.
+
+## Go-live checklist
+
+- [ ] Staging base URL and staging addresses received; end-to-end order completed on staging in both directions for every chain pair you will offer
+- [ ] `approvalRequired` path and Permit2 path both exercised
+- [ ] Order tracking implemented, including the `Reverted` path and the `success == false` case
+- [ ] Fee breakdown displayed to the user with the fee marked non-refundable
+- [ ] Slippage default agreed (the API default applies when `slippage` is omitted)
+- [ ] Mainnet smoke test with a small order on each chain pair
+- [ ] Escalation contacts exchanged on both sides, with a shared channel for incidents
+
+## What we need from you
+
+| Item | Why |
+| --- | --- |
+| Source and destination chains, and the token list you will expose | To confirm liquidity and routes before launch |
+| Expected daily volume and largest single ticket | To size vault liquidity and the per-chain `maxOrderAmount` |
+| Whether you need destination calls (deposit into a protocol after the bridge) | Changes seed derivation and the quote request |
+| The addresses or address ranges your users will trade from, if attributable | For volume attribution and reconciliation |
+| Preferred tracking method: polling, websocket, or your own indexer | To provision the monitoring endpoint |
+| Technical contact and a security contact | For upgrade notices and incident response |
+| A short description of your signing setup (EOA, smart account, MPC) | To decide between standard approvals and Permit2 |
+
+## Support
+
+Integration questions go to the shared partner channel. Include the `requestId` from the quote response and the `orderHash` when reporting an issue; both are indexed on our side.

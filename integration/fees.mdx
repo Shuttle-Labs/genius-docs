@@ -1,0 +1,28 @@
+---
+title: Fees and partner attribution
+description: Fee components, current mainnet values, and how partner volume is attributed
+---
+
+The user pays one fee, deducted in USDC from `amountIn` on the source chain. It has three on-chain components plus a gas surplus, and the quoting API returns all of them in `feesDetails` so the partner can display a breakdown.
+
+| Component | How it is set | Current mainnet value | Where it goes |
+| --- | --- | --- | --- |
+| Base fee | Flat, per destination chain | 0.10 USDC to every chain, 1.00 USDC to Ethereum | Operator bucket, pays the orchestrator's destination gas |
+| BPS fee | Tiered on order size, in USDC | 25 bps below 100, 15 bps from 100, 10 bps from 1,000, 5 bps from 10,000 | 10 percent to the protocol, 90 percent to liquidity providers |
+| Insurance fee | Tiered, in bps | At most 1 bp | Stays in the source vault as liquidity |
+| Fee surplus | Set by the quoting API from the destination swap and call gas estimate | Varies with the route | Operator bucket |
+
+`totalFee = baseFee + bpsFee + insuranceFee` is what `FeeCollector.getOrderFees(amount, destChainId)` returns. The router adds `feeSurplus` on top. The user receives `amountIn - fee` worth of USDC on the destination, swapped into `tokenOut` if requested.
+
+<Note>
+Treat `getOrderFees` and the API as the source of truth. Tiers are admin-adjustable without an upgrade.
+</Note>
+
+## Partner attribution
+
+The `Order` struct carries no integrator field and the contracts have no per-order fee recipient, so partner revenue share is settled off-chain from the protocol's fee buckets. Attribution of volume to a partner uses two signals:
+
+- The partner API key sent with quoting requests, once keys are issued at onboarding. Every quote and the resulting `orderHash` are logged against the key.
+- The `trader` addresses the partner reports, matched against `OrderCreated` events, as a fallback and for reconciliation.
+
+Revenue share percentages, settlement currency and cadence are set in the partnership agreement rather than in this documentation. Partners who want a fee on top of the protocol fee can also wrap the router call in their own contract and take the fee before calling `swapAndCreateOrder`; the vault does not restrict the caller.
