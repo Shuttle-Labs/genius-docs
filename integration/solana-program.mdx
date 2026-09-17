@@ -1,0 +1,48 @@
+---
+title: Solana program
+description: create_order instruction, account layout, validation, and tracking
+---
+
+One Anchor program mirrors the EVM vault. A partner creates orders with the `create_order` instruction; the vault holds USDC in a PDA-owned associated token account, and orchestrators fill and refund exactly as on EVM. Any non-USDC input is swapped to USDC via Jupiter in the same transaction; the quoting API builds that transaction for you, so direct instruction assembly is only needed for custom integrations.
+
+## `create_order` arguments
+
+| Argument | Type | Meaning |
+| --- | --- | --- |
+| `amount` | `u64` | USDC amount deposited, fee included, 6 decimals |
+| `seed` | `[u8; 32]` | Unique per order; also derives the order PDA |
+| `receiver` | `[u8; 32]` | Destination recipient, an EVM address left-padded to 32 bytes or a Solana pubkey |
+| `src_chain_id` | `u32` | `1399811149` |
+| `dest_chain_id` | `u32` | EVM chain id of the destination |
+| `token_in` | `[u8; 32]` | USDC mint |
+| `fee` | `u64` | Must be at least the `target_chain_min_fee` account's `min_fee` for `dest_chain_id` |
+| `min_amount_out` | `u64` | Slippage floor on the destination leg |
+| `token_out` | `[u8; 32]` | Destination token |
+
+## Accounts, in order
+
+| Account | Derivation | Notes |
+| --- | --- | --- |
+| `trader` | Signer, writable | Pays rent for the order account |
+| `global_state` | PDA `["genius-global-state"]` | Rejects when `frozen` |
+| `asset` | PDA `["genius-asset-seed"]`, writable | Fee accounting |
+| `ata_trader` | ATA of `(usdc_mint, trader)` | Created if missing |
+| `vault` | PDA `["genius-vault"]` | Authority of the vault USDC account |
+| `ata_vault` | ATA of `(usdc_mint, vault)`, writable | Receives the deposit |
+| `usdc_mint` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | Must equal `global_state.base_mint` |
+| `order` | PDA `[seed, "genius-order"]`, writable | Created by the instruction; must not already exist |
+| `target_chain_min_fee` | PDA `[dest_chain_id (u32 LE), usdc_mint, "genius-target-chain-min-fee"]` | Per-destination minimum fee |
+| `price_update` | Pyth `PriceUpdateV2` for USDC/USD, feed `0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a` | Must be at most 60 seconds old |
+| `token_program`, `associated_token_program`, `system_program` | Programs | |
+
+## Validation and errors
+
+- Pyth USDC/USD price must sit inside `[0.99, 1.10]` after confidence adjustment, else `StableCoinPriceTooLow` or `StableCoinPriceTooHigh`.
+- `src_chain_id` must differ from `dest_chain_id` (`SameSourceAndDestinationChainIds`).
+- The order PDA must be new (`OrderAlreadyExists`).
+- `fee` must reach the destination minimum (`InsufficientFees`).
+- `GlobalStateFrozen` when the protocol is paused.
+
+## Tracking
+
+The `order` account stores `status` (`Unexistant`, `Created`, `Filled`, `Reverted`) plus every field above. Fetch it by re-deriving the PDA from the seed. For Solana-bound orders created on EVM, the destination fill is visible on the order PDA derived from the same seed, and the EVM `OrderCreated` event carries the seed.
